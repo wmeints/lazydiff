@@ -15,7 +15,7 @@ use ratatui::{
 };
 use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -136,11 +136,8 @@ impl App {
 
         let filename = format!("diff_{}.patch", timestamp);
 
-        // Write patch to file
-        let mut file = fs::File::create(&filename)
-            .map_err(|e| format!("Failed to create file: {}", e))?;
-
-        file.write_all(patch.as_bytes())
+        // Write patch to file (fs::write handles flushing automatically)
+        fs::write(&filename, patch.as_bytes())
             .map_err(|e| format!("Failed to write to file: {}", e))?;
 
         Ok(filename)
@@ -370,4 +367,150 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    fn create_test_files() -> Result<(String, String), Box<dyn std::error::Error>> {
+        let source_path = "test_source_temp.txt";
+        let target_path = "test_target_temp.txt";
+
+        let mut source_file = fs::File::create(source_path)?;
+        source_file.write_all(b"Line 1\nLine 2\nLine 3\nLine to remove\n")?;
+
+        let mut target_file = fs::File::create(target_path)?;
+        target_file.write_all(b"Line 1\nLine 2 modified\nLine 3\nLine added\n")?;
+
+        Ok((source_path.to_string(), target_path.to_string()))
+    }
+
+    fn cleanup_test_files(source: &str, target: &str) {
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn test_generate_patch() -> Result<(), Box<dyn std::error::Error>> {
+        let (source, target) = create_test_files()?;
+        let app = App::new(source.clone(), target.clone())?;
+
+        let patch = app.generate_patch();
+
+        // Verify patch header
+        assert!(patch.contains(&format!("--- {}", source)));
+        assert!(patch.contains(&format!("+++ {}", target)));
+
+        // Verify patch contains unchanged lines with space prefix
+        assert!(patch.contains(" Line 1"));
+        assert!(patch.contains(" Line 3"));
+
+        // Verify patch contains removed lines with - prefix
+        assert!(patch.contains("-Line 2"));
+        assert!(patch.contains("-Line to remove"));
+
+        // Verify patch contains added lines with + prefix
+        assert!(patch.contains("+Line 2 modified"));
+        assert!(patch.contains("+Line added"));
+
+        cleanup_test_files(&source, &target);
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_to_file() -> Result<(), Box<dyn std::error::Error>> {
+        let (source, target) = create_test_files()?;
+        let app = App::new(source.clone(), target.clone())?;
+
+        // Export the patch
+        let filename = app.export_to_file()?;
+
+        // Verify file was created
+        assert!(Path::new(&filename).exists());
+
+        // Verify filename format
+        assert!(filename.starts_with("diff_"));
+        assert!(filename.ends_with(".patch"));
+
+        // Read and verify file contents
+        let contents = fs::read_to_string(&filename)?;
+        assert!(!contents.is_empty(), "Patch file should not be empty");
+        assert!(contents.contains(&format!("--- {}", source)));
+        assert!(contents.contains(&format!("+++ {}", target)));
+
+        // Verify patch has proper structure - should contain some content
+        let line_count = contents.lines().count();
+        assert!(line_count > 2, "Patch should have more than just headers");
+
+        // Cleanup
+        cleanup_test_files(&source, &target);
+        fs::remove_file(&filename)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_creates_unique_filenames() -> Result<(), Box<dyn std::error::Error>> {
+        let (source, target) = create_test_files()?;
+        let app = App::new(source.clone(), target.clone())?;
+
+        // Export twice
+        let filename1 = app.export_to_file()?;
+        assert!(Path::new(&filename1).exists(), "First export file should exist");
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let filename2 = app.export_to_file()?;
+        assert!(Path::new(&filename2).exists(), "Second export file should exist");
+
+        // Verify different filenames
+        assert_ne!(filename1, filename2);
+
+        // Cleanup - remove patch files first, then test files
+        if Path::new(&filename1).exists() {
+            fs::remove_file(&filename1)?;
+        }
+        if Path::new(&filename2).exists() {
+            fs::remove_file(&filename2)?;
+        }
+        cleanup_test_files(&source, &target);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_patch_format_with_no_changes() -> Result<(), Box<dyn std::error::Error>> {
+        let source_path = "test_identical_source.txt";
+        let target_path = "test_identical_target.txt";
+
+        let mut source_file = fs::File::create(source_path)?;
+        source_file.write_all(b"Same content\n")?;
+
+        let mut target_file = fs::File::create(target_path)?;
+        target_file.write_all(b"Same content\n")?;
+
+        let app = App::new(source_path.to_string(), target_path.to_string())?;
+        let patch = app.generate_patch();
+
+        // Verify header exists
+        assert!(patch.starts_with("---"));
+        assert!(patch.contains("+++"));
+
+        // Verify all lines are unchanged (space prefix)
+        assert!(patch.contains(" Same content"));
+
+        // Make sure there are no actual deletions (not counting the header ---)
+        let lines: Vec<&str> = patch.lines().collect();
+        let has_deletions = lines.iter().skip(2).any(|line| line.starts_with('-'));
+        assert!(!has_deletions);
+
+        // Make sure there are no additions (not counting the header +++)
+        let has_additions = lines.iter().skip(2).any(|line| line.starts_with('+'));
+        assert!(!has_additions);
+
+        cleanup_test_files(source_path, target_path);
+        Ok(())
+    }
 }
