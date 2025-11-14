@@ -10,13 +10,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Terminal,
 };
 use similar::{ChangeTag, TextDiff};
+use std::env;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,13 @@ struct Cli {
     target: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum AppMode {
+    DiffView,
+    SelectingSource,
+    SelectingTarget,
+}
+
 struct App {
     source_file: String,
     target_file: String,
@@ -40,12 +48,144 @@ struct App {
     scroll_offset: usize,
     status_message: Option<String>,
     clipboard: Clipboard,
+    mode: AppMode,
+    file_browser: FileBrowser,
 }
 
 #[derive(Clone)]
 struct DiffLine {
     tag: ChangeTag,
     content: String,
+}
+
+struct FileBrowser {
+    current_dir: PathBuf,
+    entries: Vec<PathBuf>,
+    selected_index: usize,
+    scroll_offset: usize,
+}
+
+impl FileBrowser {
+    fn new() -> Result<Self, io::Error> {
+        let current_dir = env::current_dir()?;
+        let mut browser = FileBrowser {
+            current_dir: current_dir.clone(),
+            entries: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        };
+        browser.load_entries()?;
+        Ok(browser)
+    }
+
+    fn load_entries(&mut self) -> Result<(), io::Error> {
+        self.entries.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+
+        // Add parent directory entry if not at root
+        if self.current_dir.parent().is_some() {
+            self.entries.push(PathBuf::from(".."));
+        }
+
+        // Read directory entries
+        let mut entries: Vec<PathBuf> = fs::read_dir(&self.current_dir)?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+
+        // Sort: directories first, then files, alphabetically
+        entries.sort_by(|a, b| {
+            let a_is_dir = a.is_dir();
+            let b_is_dir = b.is_dir();
+
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        });
+
+        self.entries.extend(entries);
+        Ok(())
+    }
+
+    fn move_up(&mut self) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+            if self.selected_index < self.scroll_offset {
+                self.scroll_offset = self.selected_index;
+            }
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.selected_index + 1 < self.entries.len() {
+            self.selected_index += 1;
+        }
+    }
+
+    fn update_scroll(&mut self, viewport_height: usize) {
+        if self.selected_index >= self.scroll_offset + viewport_height {
+            self.scroll_offset = self.selected_index - viewport_height + 1;
+        } else if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        }
+    }
+
+    fn enter_selected(&mut self) -> Result<Option<PathBuf>, io::Error> {
+        if self.entries.is_empty() {
+            return Ok(None);
+        }
+
+        let selected = &self.entries[self.selected_index];
+
+        // Handle parent directory
+        if selected.to_str() == Some("..") {
+            if let Some(parent) = self.current_dir.parent() {
+                self.current_dir = parent.to_path_buf();
+                self.load_entries()?;
+            }
+            return Ok(None);
+        }
+
+        let full_path = if selected.is_absolute() {
+            selected.clone()
+        } else {
+            self.current_dir.join(selected)
+        };
+
+        if full_path.is_dir() {
+            self.current_dir = full_path;
+            self.load_entries()?;
+            Ok(None)
+        } else if full_path.is_file() {
+            Ok(Some(full_path))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_display_name(&self, path: &PathBuf) -> String {
+        if path.to_str() == Some("..") {
+            return "..".to_string();
+        }
+
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+
+        if path.is_absolute() && path.is_dir() {
+            format!("{}/", name)
+        } else if !path.is_absolute() {
+            name
+        } else if self.current_dir.join(path).is_dir() {
+            format!("{}/", name)
+        } else {
+            name
+        }
+    }
 }
 
 impl App {
@@ -75,6 +215,7 @@ impl App {
         }
 
         let clipboard = Clipboard::new()?;
+        let file_browser = FileBrowser::new()?;
 
         Ok(App {
             source_file,
@@ -83,7 +224,32 @@ impl App {
             scroll_offset: 0,
             status_message: None,
             clipboard,
+            mode: AppMode::DiffView,
+            file_browser,
         })
+    }
+
+    fn regenerate_diff(&mut self) -> Result<(), io::Error> {
+        let source_content = fs::read_to_string(&self.source_file)?;
+        let target_content = fs::read_to_string(&self.target_file)?;
+
+        let diff = TextDiff::from_lines(&source_content, &target_content);
+        self.diff_lines.clear();
+
+        for change in diff.iter_all_changes() {
+            let tag = change.tag();
+            let content = change.value().to_string();
+
+            for line in content.lines() {
+                self.diff_lines.push(DiffLine {
+                    tag,
+                    content: line.to_string(),
+                });
+            }
+        }
+
+        self.scroll_offset = 0;
+        Ok(())
     }
 
     fn scroll_up(&mut self) {
@@ -168,7 +334,7 @@ fn run_app<B: ratatui::backend::Backend>(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // Header with file names
-                    Constraint::Min(0),    // Diff content
+                    Constraint::Min(0),    // Diff content or file browser
                     Constraint::Length(3), // Status bar
                 ])
                 .split(f.area());
@@ -187,45 +353,83 @@ fn run_app<B: ratatui::backend::Backend>(
 
             f.render_widget(header, chunks[0]);
 
-            // Diff content
-            let content_height = chunks[1].height.saturating_sub(2) as usize; // Subtract borders
-            let visible_lines: Vec<Line> = app
-                .diff_lines
-                .iter()
-                .skip(app.scroll_offset)
-                .take(content_height)
-                .map(|diff_line| {
-                    let (prefix, style) = match diff_line.tag {
-                        ChangeTag::Delete => (
-                            "-",
-                            Style::default()
-                                .fg(Color::Red)
-                                .add_modifier(Modifier::DIM),
-                        ),
-                        ChangeTag::Insert => (
-                            "+",
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::DIM),
-                        ),
-                        ChangeTag::Equal => (
-                            " ",
-                            Style::default(),
-                        ),
+            // Main content area - either diff view or file browser
+            match app.mode {
+                AppMode::DiffView => {
+                    // Diff content
+                    let content_height = chunks[1].height.saturating_sub(2) as usize;
+                    let visible_lines: Vec<Line> = app
+                        .diff_lines
+                        .iter()
+                        .skip(app.scroll_offset)
+                        .take(content_height)
+                        .map(|diff_line| {
+                            let (prefix, style) = match diff_line.tag {
+                                ChangeTag::Delete => (
+                                    "-",
+                                    Style::default()
+                                        .fg(Color::Red)
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                ChangeTag::Insert => (
+                                    "+",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                ChangeTag::Equal => (
+                                    " ",
+                                    Style::default(),
+                                ),
+                            };
+
+                            Line::from(vec![
+                                Span::styled(prefix, style),
+                                Span::styled(&diff_line.content, style),
+                            ])
+                        })
+                        .collect();
+
+                    let diff_widget = Paragraph::new(visible_lines)
+                        .block(Block::default().borders(Borders::ALL).title("Diff"))
+                        .wrap(Wrap { trim: false });
+
+                    f.render_widget(diff_widget, chunks[1]);
+                }
+                AppMode::SelectingSource | AppMode::SelectingTarget => {
+                    // File browser
+                    let title = if app.mode == AppMode::SelectingSource {
+                        format!("Select Source File - {}", app.file_browser.current_dir.display())
+                    } else {
+                        format!("Select Target File - {}", app.file_browser.current_dir.display())
                     };
 
-                    Line::from(vec![
-                        Span::styled(prefix, style),
-                        Span::styled(&diff_line.content, style),
-                    ])
-                })
-                .collect();
+                    let content_height = chunks[1].height.saturating_sub(2) as usize;
+                    let items: Vec<ListItem> = app
+                        .file_browser
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .skip(app.file_browser.scroll_offset)
+                        .take(content_height)
+                        .map(|(idx, entry)| {
+                            let display_name = app.file_browser.get_display_name(entry);
+                            let style = if idx == app.file_browser.selected_index {
+                                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            };
 
-            let diff_widget = Paragraph::new(visible_lines)
-                .block(Block::default().borders(Borders::ALL).title("Diff"))
-                .wrap(Wrap { trim: false });
+                            ListItem::new(display_name).style(style)
+                        })
+                        .collect();
 
-            f.render_widget(diff_widget, chunks[1]);
+                    let list = List::new(items)
+                        .block(Block::default().borders(Borders::ALL).title(title));
+
+                    f.render_widget(list, chunks[1]);
+                }
+            }
 
             // Status bar
             let status_text = if let Some(ref msg) = app.status_message {
@@ -236,21 +440,31 @@ fn run_app<B: ratatui::backend::Backend>(
                         .add_modifier(Modifier::BOLD),
                 ))]
             } else {
-                vec![Line::from(vec![
-                    Span::raw("Commands: "),
-                    Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Quit  "),
-                    Span::styled("[s]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Select source  "),
-                    Span::styled("[t]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Select target  "),
-                    Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Copy  "),
-                    Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Export  "),
-                    Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" Scroll"),
-                ])]
+                match app.mode {
+                    AppMode::DiffView => vec![Line::from(vec![
+                        Span::raw("Commands: "),
+                        Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Quit  "),
+                        Span::styled("[s]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Select source  "),
+                        Span::styled("[t]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Select target  "),
+                        Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Copy  "),
+                        Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Export  "),
+                        Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Scroll"),
+                    ])],
+                    AppMode::SelectingSource | AppMode::SelectingTarget => vec![Line::from(vec![
+                        Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Navigate  "),
+                        Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Select  "),
+                        Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(" Cancel"),
+                    ])],
+                }
             };
 
             let status_bar = Paragraph::new(status_text)
@@ -260,39 +474,95 @@ fn run_app<B: ratatui::backend::Backend>(
         })?;
 
         if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Char('q') => return Ok(()),
-                KeyCode::Char('c') => {
-                    match app.copy_to_clipboard() {
-                        Ok(_) => {
-                            app.status_message = Some("Diff copied to clipboard!".to_string());
+            app.status_message = None;
+
+            match app.mode {
+                AppMode::DiffView => {
+                    match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('s') => {
+                            app.mode = AppMode::SelectingSource;
+                            let _ = app.file_browser.load_entries();
                         }
-                        Err(e) => {
-                            app.status_message = Some(format!("Error: {}", e));
+                        KeyCode::Char('t') => {
+                            app.mode = AppMode::SelectingTarget;
+                            let _ = app.file_browser.load_entries();
                         }
+                        KeyCode::Char('c') => {
+                            match app.copy_to_clipboard() {
+                                Ok(_) => {
+                                    app.status_message = Some("Diff copied to clipboard!".to_string());
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        KeyCode::Char('e') => {
+                            match app.export_to_file() {
+                                Ok(filename) => {
+                                    app.status_message = Some(format!("Diff exported to {}", filename));
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        KeyCode::Up => {
+                            app.scroll_up();
+                        }
+                        KeyCode::Down => {
+                            let content_height = terminal.size()?.height.saturating_sub(8) as usize;
+                            app.scroll_down(content_height);
+                        }
+                        _ => {}
                     }
                 }
-                KeyCode::Char('e') => {
-                    match app.export_to_file() {
-                        Ok(filename) => {
-                            app.status_message = Some(format!("Diff exported to {}", filename));
-                        }
-                        Err(e) => {
-                            app.status_message = Some(format!("Error: {}", e));
-                        }
-                    }
-                }
-                KeyCode::Up => {
-                    app.status_message = None;
-                    app.scroll_up();
-                }
-                KeyCode::Down => {
-                    app.status_message = None;
+                AppMode::SelectingSource | AppMode::SelectingTarget => {
                     let content_height = terminal.size()?.height.saturating_sub(8) as usize;
-                    app.scroll_down(content_height);
-                }
-                _ => {
-                    app.status_message = None;
+
+                    match key.code {
+                        KeyCode::Up => {
+                            app.file_browser.move_up();
+                        }
+                        KeyCode::Down => {
+                            app.file_browser.move_down();
+                            app.file_browser.update_scroll(content_height);
+                        }
+                        KeyCode::Enter => {
+                            match app.file_browser.enter_selected() {
+                                Ok(Some(selected_file)) => {
+                                    // File was selected
+                                    if let Some(file_path) = selected_file.to_str() {
+                                        if app.mode == AppMode::SelectingSource {
+                                            app.source_file = file_path.to_string();
+                                            app.status_message = Some(format!("Source file: {}", file_path));
+                                        } else {
+                                            app.target_file = file_path.to_string();
+                                            app.status_message = Some(format!("Target file: {}", file_path));
+                                        }
+
+                                        // Regenerate diff
+                                        if let Err(e) = app.regenerate_diff() {
+                                            app.status_message = Some(format!("Error loading files: {}", e));
+                                        }
+
+                                        app.mode = AppMode::DiffView;
+                                    }
+                                }
+                                Ok(None) => {
+                                    // Directory was entered, nothing to do
+                                }
+                                Err(e) => {
+                                    app.status_message = Some(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.mode = AppMode::DiffView;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
