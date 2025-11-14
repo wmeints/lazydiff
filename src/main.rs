@@ -15,9 +15,10 @@ use ratatui::{
 };
 use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A terminal-based diff viewer
 #[derive(Parser)]
@@ -122,6 +123,27 @@ impl App {
 
         self.clipboard.set_text(patch)
             .map_err(|e| format!("Failed to copy to clipboard: {}", e))
+    }
+
+    fn export_to_file(&self) -> Result<String, String> {
+        let patch = self.generate_patch();
+
+        // Generate filename with timestamp
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("Failed to get timestamp: {}", e))?
+            .as_secs();
+
+        let filename = format!("diff_{}.patch", timestamp);
+
+        // Write patch to file
+        let mut file = fs::File::create(&filename)
+            .map_err(|e| format!("Failed to create file: {}", e))?;
+
+        file.write_all(patch.as_bytes())
+            .map_err(|e| format!("Failed to write to file: {}", e))?;
+
+        Ok(filename)
     }
 }
 
@@ -247,6 +269,16 @@ fn run_app<B: ratatui::backend::Backend>(
                     match app.copy_to_clipboard() {
                         Ok(_) => {
                             app.status_message = Some("Diff copied to clipboard!".to_string());
+                        }
+                        Err(e) => {
+                            app.status_message = Some(format!("Error: {}", e));
+                        }
+                    }
+                }
+                KeyCode::Char('e') => {
+                    match app.export_to_file() {
+                        Ok(filename) => {
+                            app.status_message = Some(format!("Diff exported to {}", filename));
                         }
                         Err(e) => {
                             app.status_message = Some(format!("Error: {}", e));

@@ -1,0 +1,42 @@
+--- ../coding-agent-workshop/labs/agent-loop/001-setup-application/CodingAgent/Program.cs
++++ ../coding-agent-workshop/labs/agent-loop/002-main-agent-loop/CodingAgent/Program.cs
+ ﻿using Microsoft.Extensions.Configuration;
+ using Microsoft.SemanticKernel;
+-
++using CodingAgent;
++using Spectre.Console;
+ 
+ var configuration = new ConfigurationBuilder()
+     .AddUserSecrets(typeof(Program).Assembly)
+     .AddEnvironmentVariables()
+     .Build();
+ 
+ var kernelBuilder = Kernel.CreateBuilder()
+     .AddAzureOpenAIChatCompletion(
+         configuration["LanguageModel:DeploymentName"]!,
+         configuration["LanguageModel:Endpoint"]!,
+         configuration["LanguageModel:ApiKey"]!
+     );
+ 
+ var kernel = kernelBuilder.Build();
++var instructions = new AgentInstructions(kernel);
++var agent = new Agent(kernel, instructions);
++
++AnsiConsole.Write(new Markup("[green]CODING AGENT[/]\n"));
++AnsiConsole.Write(new Rule());
+ 
+-Console.WriteLine("You bettah check yoself, you're about to build an agent.");
++while (true)
++{
++    var prompt = AnsiConsole.Prompt(new TextPrompt<string>(">"));
++    var callbacks = new ConsoleCallbacks();
++
++    // Stop the application when the user enters /exit or /quit.
++    if (string.Compare(prompt, "/exit", StringComparison.OrdinalIgnoreCase) == 0 ||
++        string.Compare(prompt, "/quit", StringComparison.OrdinalIgnoreCase) == 0)
++    {
++        break;
++    }
++
++    await agent.InvokeAsync(prompt, callbacks);
++}
