@@ -32,16 +32,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Validate files if provided, before entering TUI mode
     if let Some(source) = &args.source
-        && let Err(e) = diff::validate_file(source, "Source") {
-            eprintln!("Error: {}", e);
-            process::exit(1);
-        }
+        && let Err(e) = diff::validate_file(source, "Source")
+    {
+        eprintln!("Error: {}", e);
+        process::exit(1);
+    }
 
     if let Some(target) = &args.target
-        && let Err(e) = diff::validate_file(target, "Target") {
-            eprintln!("Error: {}", e);
-            process::exit(1);
-        }
+        && let Err(e) = diff::validate_file(target, "Target")
+    {
+        eprintln!("Error: {}", e);
+        process::exit(1);
+    }
 
     // Setup terminal
     enable_raw_mode()?;
