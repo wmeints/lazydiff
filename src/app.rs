@@ -26,7 +26,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(source_file: String, target_file: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        source_file: String,
+        target_file: String,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let source_content = fs::read_to_string(&source_file)?;
         let target_content = fs::read_to_string(&target_file)?;
 
@@ -110,14 +113,16 @@ fn handle_file_selection(app: &mut App) {
                     // If target is not set, move to selecting target
                     if app.target_file.is_empty() {
                         app.mode = AppMode::SelectingTarget;
-                        app.status_message = Some(format!("Source: {} - Now select target file", file_path));
+                        app.status_message =
+                            Some(format!("Source: {} - Now select target file", file_path));
                         let _ = app.file_browser.load_entries();
                     } else {
                         // Both files are set, regenerate diff
                         if let Err(e) = app.regenerate_diff() {
                             app.status_message = Some(format!("Error loading files: {}", e));
                         } else {
-                            app.status_message = Some(format!("Source file updated: {}", file_path));
+                            app.status_message =
+                                Some(format!("Source file updated: {}", file_path));
                         }
                         app.mode = AppMode::DiffView;
                     }
@@ -127,14 +132,16 @@ fn handle_file_selection(app: &mut App) {
                     // If source is not set, move to selecting source
                     if app.source_file.is_empty() {
                         app.mode = AppMode::SelectingSource;
-                        app.status_message = Some(format!("Target: {} - Now select source file", file_path));
+                        app.status_message =
+                            Some(format!("Target: {} - Now select source file", file_path));
                         let _ = app.file_browser.load_entries();
                     } else {
                         // Both files are set, regenerate diff
                         if let Err(e) = app.regenerate_diff() {
                             app.status_message = Some(format!("Error loading files: {}", e));
                         } else {
-                            app.status_message = Some(format!("Target file updated: {}", file_path));
+                            app.status_message =
+                                Some(format!("Target file updated: {}", file_path));
                         }
                         app.mode = AppMode::DiffView;
                     }
@@ -198,26 +205,22 @@ fn handle_diffview_input<B: ratatui::backend::Backend>(
             app.mode = AppMode::SelectingTarget;
             let _ = app.file_browser.load_entries();
         }
-        KeyCode::Char('c') => {
-            match app.copy_to_clipboard() {
-                Ok(_) => {
-                    app.status_message = Some("Diff copied to clipboard!".to_string());
-                }
-                Err(e) => {
-                    app.status_message = Some(format!("Error: {}", e));
-                }
+        KeyCode::Char('c') => match app.copy_to_clipboard() {
+            Ok(_) => {
+                app.status_message = Some("Diff copied to clipboard!".to_string());
             }
-        }
-        KeyCode::Char('e') => {
-            match app.export_to_file() {
-                Ok(filename) => {
-                    app.status_message = Some(format!("Diff exported to {}", filename));
-                }
-                Err(e) => {
-                    app.status_message = Some(format!("Error: {}", e));
-                }
+            Err(e) => {
+                app.status_message = Some(format!("Error: {}", e));
             }
-        }
+        },
+        KeyCode::Char('e') => match app.export_to_file() {
+            Ok(filename) => {
+                app.status_message = Some(format!("Diff exported to {}", filename));
+            }
+            Err(e) => {
+                app.status_message = Some(format!("Error: {}", e));
+            }
+        },
         KeyCode::Up => {
             app.scroll_up();
         }
@@ -454,7 +457,10 @@ mod tests {
                     clipboard_content.contains(&format!("+++ {}", target)),
                     "Clipboard should contain target file header"
                 );
-                assert!(!clipboard_content.is_empty(), "Clipboard should not be empty");
+                assert!(
+                    !clipboard_content.is_empty(),
+                    "Clipboard should not be empty"
+                );
                 assert!(
                     clipboard_content.lines().count() > 2,
                     "Clipboard should have more than just headers"

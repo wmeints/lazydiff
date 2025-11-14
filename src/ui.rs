@@ -1,10 +1,10 @@
 use crate::app::{App, AppMode};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
-    Frame,
 };
 use similar::ChangeTag;
 
@@ -59,9 +59,7 @@ fn render_diff_view(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let (prefix, style) = match diff_line.tag {
                 ChangeTag::Delete => (
                     "-",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::DIM),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
                 ),
                 ChangeTag::Insert => (
                     "+",
