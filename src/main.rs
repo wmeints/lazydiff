@@ -128,11 +128,11 @@ impl App {
     fn export_to_file(&self) -> Result<String, String> {
         let patch = self.generate_patch();
 
-        // Generate filename with timestamp
+        // Generate filename with high-precision timestamp to avoid collisions
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("Failed to get timestamp: {}", e))?
-            .as_secs();
+            .as_nanos();
 
         let filename = format!("diff_{}.patch", timestamp);
 
@@ -374,18 +374,33 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    // Mutex to serialize clipboard access during tests
+    // The system clipboard is a shared resource that can't be accessed concurrently
+    static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
     fn create_test_files() -> Result<(String, String), Box<dyn std::error::Error>> {
-        let source_path = "test_source_temp.txt";
-        let target_path = "test_target_temp.txt";
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::thread;
 
-        let mut source_file = fs::File::create(source_path)?;
+        // Generate unique file names using timestamp and thread ID
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_nanos();
+        let thread_id = format!("{:?}", thread::current().id());
+        let unique_suffix = format!("{}_{}", timestamp, thread_id.replace("ThreadId(", "").replace(")", ""));
+
+        let source_path = format!("test_source_{}_.txt", unique_suffix);
+        let target_path = format!("test_target_{}_.txt", unique_suffix);
+
+        let mut source_file = fs::File::create(&source_path)?;
         source_file.write_all(b"Line 1\nLine 2\nLine 3\nLine to remove\n")?;
 
-        let mut target_file = fs::File::create(target_path)?;
+        let mut target_file = fs::File::create(&target_path)?;
         target_file.write_all(b"Line 1\nLine 2 modified\nLine 3\nLine added\n")?;
 
-        Ok((source_path.to_string(), target_path.to_string()))
+        Ok((source_path, target_path))
     }
 
     fn cleanup_test_files(source: &str, target: &str) {
@@ -482,13 +497,23 @@ mod tests {
 
     #[test]
     fn test_patch_format_with_no_changes() -> Result<(), Box<dyn std::error::Error>> {
-        let source_path = "test_identical_source.txt";
-        let target_path = "test_identical_target.txt";
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::thread;
 
-        let mut source_file = fs::File::create(source_path)?;
+        // Generate unique file names
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_nanos();
+        let thread_id = format!("{:?}", thread::current().id());
+        let unique_suffix = format!("{}_{}", timestamp, thread_id.replace("ThreadId(", "").replace(")", ""));
+
+        let source_path = format!("test_identical_source_{}_.txt", unique_suffix);
+        let target_path = format!("test_identical_target_{}_.txt", unique_suffix);
+
+        let mut source_file = fs::File::create(&source_path)?;
         source_file.write_all(b"Same content\n")?;
 
-        let mut target_file = fs::File::create(target_path)?;
+        let mut target_file = fs::File::create(&target_path)?;
         target_file.write_all(b"Same content\n")?;
 
         let app = App::new(source_path.to_string(), target_path.to_string())?;
@@ -510,7 +535,132 @@ mod tests {
         let has_additions = lines.iter().skip(2).any(|line| line.starts_with('+'));
         assert!(!has_additions);
 
-        cleanup_test_files(source_path, target_path);
+        cleanup_test_files(&source_path, &target_path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_copy_to_clipboard() -> Result<(), Box<dyn std::error::Error>> {
+        // Lock clipboard to prevent parallel tests from interfering
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+
+        let (source, target) = create_test_files()?;
+        let mut app = App::new(source.clone(), target.clone())?;
+
+        // Attempt to copy to clipboard
+        let result = app.copy_to_clipboard();
+
+        // In some test environments, clipboard might not be available
+        // So we just verify the method returns without panicking
+        match result {
+            Ok(_) => {
+                // Clipboard operation succeeded
+                // Verify we can read back from the clipboard
+                let clipboard_content = app.clipboard.get_text()
+                    .expect("Should be able to read clipboard after successful copy");
+
+                // Verify clipboard contains patch headers
+                assert!(clipboard_content.contains(&format!("--- {}", source)));
+                assert!(clipboard_content.contains(&format!("+++ {}", target)));
+
+                // Verify clipboard contains actual diff content
+                assert!(!clipboard_content.is_empty());
+            }
+            Err(e) => {
+                // Clipboard might not be available in test environment
+                // This is acceptable - we just want to ensure it doesn't panic
+                eprintln!("Clipboard not available in test environment: {}", e);
+            }
+        }
+
+        cleanup_test_files(&source, &target);
+        Ok(())
+    }
+
+    #[test]
+    fn test_clipboard_contains_correct_patch() -> Result<(), Box<dyn std::error::Error>> {
+        // Lock clipboard to prevent parallel tests from interfering
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+
+        let (source, target) = create_test_files()?;
+        let mut app = App::new(source.clone(), target.clone())?;
+
+        // Generate patch first to capture expected content
+        let expected_patch = app.generate_patch();
+
+        // Copy to clipboard
+        if let Ok(_) = app.copy_to_clipboard() {
+            // Verify clipboard contains the expected content
+            if let Ok(clipboard_content) = app.clipboard.get_text() {
+                // Verify clipboard contains patch headers
+                assert!(clipboard_content.contains(&format!("--- {}", source)),
+                    "Clipboard should contain source file header");
+                assert!(clipboard_content.contains(&format!("+++ {}", target)),
+                    "Clipboard should contain target file header");
+
+                // Verify clipboard is not empty and has reasonable content
+                assert!(!clipboard_content.is_empty(), "Clipboard should not be empty");
+                assert!(clipboard_content.lines().count() > 2,
+                    "Clipboard should have more than just headers");
+
+                // The clipboard content should be the same as the generated patch
+                assert_eq!(clipboard_content, expected_patch,
+                    "Clipboard content should exactly match generated patch");
+            }
+        }
+
+        cleanup_test_files(&source, &target);
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_clipboard_copies() -> Result<(), Box<dyn std::error::Error>> {
+        // Lock clipboard to prevent parallel tests from interfering
+        let _lock = CLIPBOARD_LOCK.lock().unwrap();
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::thread;
+
+        // First copy
+        let (source1, target1) = create_test_files()?;
+        let mut app1 = App::new(source1.clone(), target1.clone())?;
+        let patch1 = app1.generate_patch();
+
+        if let Ok(_) = app1.copy_to_clipboard() {
+            if let Ok(content) = app1.clipboard.get_text() {
+                assert_eq!(content, patch1);
+            }
+        }
+
+        cleanup_test_files(&source1, &target1);
+
+        // Second copy with different content - use unique file names
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_nanos();
+        let thread_id = format!("{:?}", thread::current().id());
+        let unique_suffix = format!("{}_{}", timestamp, thread_id.replace("ThreadId(", "").replace(")", ""));
+
+        let source2_path = format!("test_source2_{}_.txt", unique_suffix);
+        let target2_path = format!("test_target2_{}_.txt", unique_suffix);
+
+        let mut source_file = fs::File::create(&source2_path)?;
+        source_file.write_all(b"Different line 1\nDifferent line 2\n")?;
+
+        let mut target_file = fs::File::create(&target2_path)?;
+        target_file.write_all(b"Different line 1\nModified line 2\n")?;
+
+        let mut app2 = App::new(source2_path.to_string(), target2_path.to_string())?;
+        let patch2 = app2.generate_patch();
+
+        if let Ok(_) = app2.copy_to_clipboard() {
+            if let Ok(content) = app2.clipboard.get_text() {
+                assert_eq!(content, patch2);
+                assert_ne!(content, patch1, "Second copy should overwrite first");
+            }
+        }
+
+        cleanup_test_files(&source2_path, &target2_path);
         Ok(())
     }
 }
