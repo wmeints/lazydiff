@@ -20,7 +20,7 @@ pub struct App {
     pub diff_lines: Vec<DiffLine>,
     pub scroll_offset: usize,
     pub status_message: Option<String>,
-    pub clipboard: Clipboard,
+    pub clipboard: Option<Clipboard>,
     pub mode: AppMode,
     pub file_browser: FileBrowser,
 }
@@ -35,7 +35,8 @@ impl App {
 
         let diff_lines = diff::generate_diff(&source_content, &target_content);
 
-        let clipboard = Clipboard::new()?;
+        // Try to initialize clipboard, but allow it to fail gracefully
+        let clipboard = Clipboard::new().ok();
         let file_browser = FileBrowser::new()?;
 
         Ok(App {
@@ -51,7 +52,8 @@ impl App {
     }
 
     pub fn new_empty(initial_mode: AppMode) -> Result<Self, Box<dyn std::error::Error>> {
-        let clipboard = Clipboard::new()?;
+        // Try to initialize clipboard, but allow it to fail gracefully
+        let clipboard = Clipboard::new().ok();
         let file_browser = FileBrowser::new()?;
 
         Ok(App {
@@ -93,7 +95,10 @@ impl App {
 
     pub fn copy_to_clipboard(&mut self) -> Result<(), String> {
         let patch = self.generate_patch();
-        diff::copy_to_clipboard(&mut self.clipboard, &patch)
+        match &mut self.clipboard {
+            Some(clipboard) => diff::copy_to_clipboard(clipboard, &patch),
+            None => Err("Clipboard not available in this environment".to_string()),
+        }
     }
 
     pub fn export_to_file(&self) -> Result<String, String> {
@@ -420,14 +425,15 @@ mod tests {
 
         match result {
             Ok(_) => {
-                let clipboard_content = app
-                    .clipboard
-                    .get_text()
-                    .expect("Should read clipboard after successful copy");
+                if let Some(clipboard) = &mut app.clipboard {
+                    let clipboard_content = clipboard
+                        .get_text()
+                        .expect("Should read clipboard after successful copy");
 
-                assert!(clipboard_content.contains(&format!("--- {}", source)));
-                assert!(clipboard_content.contains(&format!("+++ {}", target)));
-                assert!(!clipboard_content.is_empty());
+                    assert!(clipboard_content.contains(&format!("--- {}", source)));
+                    assert!(clipboard_content.contains(&format!("+++ {}", target)));
+                    assert!(!clipboard_content.is_empty());
+                }
             }
             Err(e) => {
                 eprintln!("Clipboard not available: {}", e);
@@ -448,27 +454,29 @@ mod tests {
         let expected_patch = app.generate_patch();
 
         if let Ok(_) = app.copy_to_clipboard() {
-            if let Ok(clipboard_content) = app.clipboard.get_text() {
-                assert!(
-                    clipboard_content.contains(&format!("--- {}", source)),
-                    "Clipboard should contain source file header"
-                );
-                assert!(
-                    clipboard_content.contains(&format!("+++ {}", target)),
-                    "Clipboard should contain target file header"
-                );
-                assert!(
-                    !clipboard_content.is_empty(),
-                    "Clipboard should not be empty"
-                );
-                assert!(
-                    clipboard_content.lines().count() > 2,
-                    "Clipboard should have more than just headers"
-                );
-                assert_eq!(
-                    clipboard_content, expected_patch,
-                    "Clipboard content should exactly match generated patch"
-                );
+            if let Some(clipboard) = &mut app.clipboard {
+                if let Ok(clipboard_content) = clipboard.get_text() {
+                    assert!(
+                        clipboard_content.contains(&format!("--- {}", source)),
+                        "Clipboard should contain source file header"
+                    );
+                    assert!(
+                        clipboard_content.contains(&format!("+++ {}", target)),
+                        "Clipboard should contain target file header"
+                    );
+                    assert!(
+                        !clipboard_content.is_empty(),
+                        "Clipboard should not be empty"
+                    );
+                    assert!(
+                        clipboard_content.lines().count() > 2,
+                        "Clipboard should have more than just headers"
+                    );
+                    assert_eq!(
+                        clipboard_content, expected_patch,
+                        "Clipboard content should exactly match generated patch"
+                    );
+                }
             }
         }
 
@@ -489,8 +497,10 @@ mod tests {
         let patch1 = app1.generate_patch();
 
         if let Ok(_) = app1.copy_to_clipboard() {
-            if let Ok(content) = app1.clipboard.get_text() {
-                assert_eq!(content, patch1);
+            if let Some(clipboard) = &mut app1.clipboard {
+                if let Ok(content) = clipboard.get_text() {
+                    assert_eq!(content, patch1);
+                }
             }
         }
 
@@ -518,9 +528,11 @@ mod tests {
         let patch2 = app2.generate_patch();
 
         if let Ok(_) = app2.copy_to_clipboard() {
-            if let Ok(content) = app2.clipboard.get_text() {
-                assert_eq!(content, patch2);
-                assert_ne!(content, patch1, "Second copy should overwrite first");
+            if let Some(clipboard) = &mut app2.clipboard {
+                if let Ok(content) = clipboard.get_text() {
+                    assert_eq!(content, patch2);
+                    assert_ne!(content, patch1, "Second copy should overwrite first");
+                }
             }
         }
 
