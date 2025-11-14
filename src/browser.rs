@@ -132,3 +132,126 @@ impl FileBrowser {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_browser() -> FileBrowser {
+        FileBrowser {
+            current_dir: PathBuf::from("/test"),
+            entries: vec![
+                PathBuf::from(".."),
+                PathBuf::from("dir1"),
+                PathBuf::from("dir2"),
+                PathBuf::from("file1.txt"),
+                PathBuf::from("file2.txt"),
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+        }
+    }
+
+    #[test]
+    fn test_move_down_increments_index() {
+        let mut browser = create_test_browser();
+        assert_eq!(browser.selected_index, 0);
+
+        browser.move_down();
+        assert_eq!(browser.selected_index, 1);
+
+        browser.move_down();
+        assert_eq!(browser.selected_index, 2);
+    }
+
+    #[test]
+    fn test_move_down_stops_at_last_entry() {
+        let mut browser = create_test_browser();
+        let last_index = browser.entries.len() - 1;
+
+        // Move to last entry
+        browser.selected_index = last_index;
+        browser.move_down();
+
+        // Should not go beyond last entry
+        assert_eq!(browser.selected_index, last_index);
+    }
+
+    #[test]
+    fn test_move_up_decrements_index() {
+        let mut browser = create_test_browser();
+        browser.selected_index = 2;
+
+        browser.move_up();
+        assert_eq!(browser.selected_index, 1);
+
+        browser.move_up();
+        assert_eq!(browser.selected_index, 0);
+    }
+
+    #[test]
+    fn test_move_up_stops_at_first_entry() {
+        let mut browser = create_test_browser();
+        browser.selected_index = 0;
+
+        browser.move_up();
+
+        // Should stay at 0
+        assert_eq!(browser.selected_index, 0);
+    }
+
+    #[test]
+    fn test_update_scroll_when_selected_below_viewport() {
+        let mut browser = create_test_browser();
+        let viewport_height = 3;
+
+        // Select item beyond viewport
+        browser.selected_index = 4;
+        browser.update_scroll(viewport_height);
+
+        // Scroll offset should adjust
+        assert_eq!(browser.scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_update_scroll_when_selected_above_viewport() {
+        let mut browser = create_test_browser();
+        browser.scroll_offset = 2;
+        browser.selected_index = 1;
+
+        let viewport_height = 3;
+        browser.update_scroll(viewport_height);
+
+        // Scroll offset should adjust to selected index
+        assert_eq!(browser.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_update_scroll_when_selected_within_viewport() {
+        let mut browser = create_test_browser();
+        browser.scroll_offset = 1;
+        browser.selected_index = 2;
+
+        let viewport_height = 3;
+        browser.update_scroll(viewport_height);
+
+        // Scroll offset should not change
+        assert_eq!(browser.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_get_display_name_for_parent_dir() {
+        let browser = create_test_browser();
+        let path = PathBuf::from("..");
+
+        assert_eq!(browser.get_display_name(&path), "..");
+    }
+
+    #[test]
+    fn test_get_display_name_for_relative_path() {
+        let browser = create_test_browser();
+        let path = PathBuf::from("file.txt");
+
+        assert_eq!(browser.get_display_name(&path), "file.txt");
+    }
+}
