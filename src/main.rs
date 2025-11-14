@@ -229,6 +229,22 @@ impl App {
         })
     }
 
+    fn new_empty(initial_mode: AppMode) -> Result<Self, Box<dyn std::error::Error>> {
+        let clipboard = Clipboard::new()?;
+        let file_browser = FileBrowser::new()?;
+
+        Ok(App {
+            source_file: String::new(),
+            target_file: String::new(),
+            diff_lines: Vec::new(),
+            scroll_offset: 0,
+            status_message: Some("Please select a file".to_string()),
+            clipboard,
+            mode: initial_mode,
+            file_browser,
+        })
+    }
+
     fn regenerate_diff(&mut self) -> Result<(), io::Error> {
         let source_content = fs::read_to_string(&self.source_file)?;
         let target_content = fs::read_to_string(&self.target_file)?;
@@ -536,18 +552,39 @@ fn run_app<B: ratatui::backend::Backend>(
                                     if let Some(file_path) = selected_file.to_str() {
                                         if app.mode == AppMode::SelectingSource {
                                             app.source_file = file_path.to_string();
-                                            app.status_message = Some(format!("Source file: {}", file_path));
+
+                                            // If target is not set, move to selecting target
+                                            if app.target_file.is_empty() {
+                                                app.mode = AppMode::SelectingTarget;
+                                                app.status_message = Some(format!("Source: {} - Now select target file", file_path));
+                                                let _ = app.file_browser.load_entries();
+                                            } else {
+                                                // Both files are set, regenerate diff
+                                                if let Err(e) = app.regenerate_diff() {
+                                                    app.status_message = Some(format!("Error loading files: {}", e));
+                                                } else {
+                                                    app.status_message = Some(format!("Source file updated: {}", file_path));
+                                                }
+                                                app.mode = AppMode::DiffView;
+                                            }
                                         } else {
                                             app.target_file = file_path.to_string();
-                                            app.status_message = Some(format!("Target file: {}", file_path));
-                                        }
 
-                                        // Regenerate diff
-                                        if let Err(e) = app.regenerate_diff() {
-                                            app.status_message = Some(format!("Error loading files: {}", e));
+                                            // If source is not set, move to selecting source
+                                            if app.source_file.is_empty() {
+                                                app.mode = AppMode::SelectingSource;
+                                                app.status_message = Some(format!("Target: {} - Now select source file", file_path));
+                                                let _ = app.file_browser.load_entries();
+                                            } else {
+                                                // Both files are set, regenerate diff
+                                                if let Err(e) = app.regenerate_diff() {
+                                                    app.status_message = Some(format!("Error loading files: {}", e));
+                                                } else {
+                                                    app.status_message = Some(format!("Target file updated: {}", file_path));
+                                                }
+                                                app.mode = AppMode::DiffView;
+                                            }
                                         }
-
-                                        app.mode = AppMode::DiffView;
                                     }
                                 }
                                 Ok(None) => {
@@ -559,7 +596,13 @@ fn run_app<B: ratatui::backend::Backend>(
                             }
                         }
                         KeyCode::Esc | KeyCode::Char('q') => {
-                            app.mode = AppMode::DiffView;
+                            // Only return to diff view if both files are set
+                            if !app.source_file.is_empty() && !app.target_file.is_empty() {
+                                app.mode = AppMode::DiffView;
+                            } else {
+                                // Exit the application if files aren't set
+                                return Ok(());
+                            }
                         }
                         _ => {}
                     }
@@ -572,68 +615,68 @@ fn run_app<B: ratatui::backend::Backend>(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    match (&args.source, &args.target) {
+    // Validate files if provided, before entering TUI mode
+    if let Some(source) = &args.source {
+        if let Err(e) = validate_file(source, "Source") {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+    }
+
+    if let Some(target) = &args.target {
+        if let Err(e) = validate_file(target, "Target") {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+    }
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Create app based on provided arguments
+    let app = match (&args.source, &args.target) {
         (Some(source), Some(target)) => {
-            // Validate both files exist
-            if let Err(e) = validate_file(source, "Source") {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-
-            if let Err(e) = validate_file(target, "Target") {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-
-            // Setup terminal
-            enable_raw_mode()?;
-            let mut stdout = io::stdout();
-            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-            let backend = CrosstermBackend::new(stdout);
-            let mut terminal = Terminal::new(backend)?;
-
-            // Create app and run
-            let app = App::new(source.clone(), target.clone())?;
-            let res = run_app(&mut terminal, app);
-
-            // Restore terminal
-            disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-
-            if let Err(err) = res {
-                eprintln!("Error: {}", err);
-                process::exit(1);
-            }
+            // Both files provided - create app normally
+            App::new(source.clone(), target.clone())?
         }
         (Some(source), None) => {
-            // Validate source file exists
-            if let Err(e) = validate_file(source, "Source") {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-
-            eprintln!("Source file: {}, target file not specified", source);
-            process::exit(1);
+            // Source provided, need to select target
+            let mut app = App::new_empty(AppMode::SelectingTarget)?;
+            app.source_file = source.clone();
+            app.status_message = Some(format!("Source: {} - Select target file", source));
+            app
         }
         (None, Some(target)) => {
-            // Validate target file exists
-            if let Err(e) = validate_file(target, "Target") {
-                eprintln!("Error: {}", e);
-                process::exit(1);
-            }
-
-            eprintln!("Target file: {}, source file not specified", target);
-            process::exit(1);
+            // Target provided, need to select source
+            let mut app = App::new_empty(AppMode::SelectingSource)?;
+            app.target_file = target.clone();
+            app.status_message = Some(format!("Target: {} - Select source file", target));
+            app
         }
         (None, None) => {
-            eprintln!("No files specified. Usage: lazydiff <source> <target>");
-            process::exit(1);
+            // No files provided - start by selecting source
+            App::new_empty(AppMode::SelectingSource)?
         }
+    };
+
+    let res = run_app(&mut terminal, app);
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    if let Err(err) = res {
+        eprintln!("Error: {}", err);
+        process::exit(1);
     }
 
     Ok(())
