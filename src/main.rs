@@ -1,3 +1,4 @@
+use arboard::Clipboard;
 use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -36,6 +37,8 @@ struct App {
     target_file: String,
     diff_lines: Vec<DiffLine>,
     scroll_offset: usize,
+    status_message: Option<String>,
+    clipboard: Clipboard,
 }
 
 #[derive(Clone)]
@@ -45,7 +48,7 @@ struct DiffLine {
 }
 
 impl App {
-    fn new(source_file: String, target_file: String) -> Result<Self, io::Error> {
+    fn new(source_file: String, target_file: String) -> Result<Self, Box<dyn std::error::Error>> {
         let source_content = fs::read_to_string(&source_file)?;
         let target_content = fs::read_to_string(&target_file)?;
 
@@ -70,11 +73,15 @@ impl App {
             }
         }
 
+        let clipboard = Clipboard::new()?;
+
         Ok(App {
             source_file,
             target_file,
             diff_lines,
             scroll_offset: 0,
+            status_message: None,
+            clipboard,
         })
     }
 
@@ -88,6 +95,33 @@ impl App {
         if self.scroll_offset + max_visible_lines < self.diff_lines.len() {
             self.scroll_offset += 1;
         }
+    }
+
+    fn generate_patch(&self) -> String {
+        let mut patch = String::new();
+
+        // Add patch header
+        patch.push_str(&format!("--- {}\n", self.source_file));
+        patch.push_str(&format!("+++ {}\n", self.target_file));
+
+        // Add diff lines in unified format
+        for diff_line in &self.diff_lines {
+            let prefix = match diff_line.tag {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => " ",
+            };
+            patch.push_str(&format!("{}{}\n", prefix, diff_line.content));
+        }
+
+        patch
+    }
+
+    fn copy_to_clipboard(&mut self) -> Result<(), String> {
+        let patch = self.generate_patch();
+
+        self.clipboard.set_text(patch)
+            .map_err(|e| format!("Failed to copy to clipboard: {}", e))
     }
 }
 
@@ -175,21 +209,30 @@ fn run_app<B: ratatui::backend::Backend>(
             f.render_widget(diff_widget, chunks[1]);
 
             // Status bar
-            let status_text = vec![Line::from(vec![
-                Span::raw("Commands: "),
-                Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Quit  "),
-                Span::styled("[s]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Select source  "),
-                Span::styled("[t]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Select target  "),
-                Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Copy  "),
-                Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Export  "),
-                Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" Scroll"),
-            ])];
+            let status_text = if let Some(ref msg) = app.status_message {
+                vec![Line::from(Span::styled(
+                    msg,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))]
+            } else {
+                vec![Line::from(vec![
+                    Span::raw("Commands: "),
+                    Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Quit  "),
+                    Span::styled("[s]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Select source  "),
+                    Span::styled("[t]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Select target  "),
+                    Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Copy  "),
+                    Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Export  "),
+                    Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" Scroll"),
+                ])]
+            };
 
             let status_bar = Paragraph::new(status_text)
                 .block(Block::default().borders(Borders::ALL));
@@ -200,14 +243,28 @@ fn run_app<B: ratatui::backend::Backend>(
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('c') => {
+                    match app.copy_to_clipboard() {
+                        Ok(_) => {
+                            app.status_message = Some("Diff copied to clipboard!".to_string());
+                        }
+                        Err(e) => {
+                            app.status_message = Some(format!("Error: {}", e));
+                        }
+                    }
+                }
                 KeyCode::Up => {
+                    app.status_message = None;
                     app.scroll_up();
                 }
                 KeyCode::Down => {
+                    app.status_message = None;
                     let content_height = terminal.size()?.height.saturating_sub(8) as usize;
                     app.scroll_down(content_height);
                 }
-                _ => {}
+                _ => {
+                    app.status_message = None;
+                }
             }
         }
     }
