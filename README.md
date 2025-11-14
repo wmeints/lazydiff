@@ -1,5 +1,7 @@
 # LazyDiff
 
+![Crates.io Version](https://img.shields.io/crates/v/lazydiff?style=flat-square)
+
 A terminal-based diff viewer written in Rust that makes it easier to compare
 files. The tool not only shows you nicely formatted diffs, it allows you to
 copy the patch content to the clipboard or export it as a file.
