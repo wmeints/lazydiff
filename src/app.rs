@@ -12,6 +12,7 @@ pub enum AppMode {
     DiffView,
     SelectingSource,
     SelectingTarget,
+    SelectionMode,
 }
 
 pub struct App {
@@ -19,10 +20,13 @@ pub struct App {
     pub target_file: String,
     pub diff_lines: Vec<DiffLine>,
     pub scroll_offset: usize,
+    pub cursor_position: usize,
     pub status_message: Option<String>,
     pub clipboard: Option<Clipboard>,
     pub mode: AppMode,
     pub file_browser: FileBrowser,
+    pub selection_start: Option<usize>,
+    pub selection_end: Option<usize>,
 }
 
 impl App {
@@ -44,10 +48,13 @@ impl App {
             target_file,
             diff_lines,
             scroll_offset: 0,
+            cursor_position: 0,
             status_message: None,
             clipboard,
             mode: AppMode::DiffView,
             file_browser,
+            selection_start: None,
+            selection_end: None,
         })
     }
 
@@ -61,10 +68,13 @@ impl App {
             target_file: String::new(),
             diff_lines: Vec::new(),
             scroll_offset: 0,
+            cursor_position: 0,
             status_message: Some("Please select a file".to_string()),
             clipboard,
             mode: initial_mode,
             file_browser,
+            selection_start: None,
+            selection_end: None,
         })
     }
 
@@ -90,7 +100,13 @@ impl App {
     }
 
     fn generate_patch(&self) -> String {
-        diff::generate_patch(&self.source_file, &self.target_file, &self.diff_lines)
+        let line_range = self.get_selection_range();
+        diff::generate_patch(
+            &self.source_file,
+            &self.target_file,
+            &self.diff_lines,
+            line_range,
+        )
     }
 
     pub fn copy_to_clipboard(&mut self) -> Result<(), String> {
@@ -104,6 +120,78 @@ impl App {
     pub fn export_to_file(&self) -> Result<String, String> {
         let patch = self.generate_patch();
         diff::export_to_file(&patch)
+    }
+
+    pub fn enter_selection_mode(&mut self) {
+        self.mode = AppMode::SelectionMode;
+        self.cursor_position = self.scroll_offset;
+        self.selection_start = None;
+        self.selection_end = None;
+        self.status_message =
+            Some("SELECTION MODE - Press Space to mark start/end, v to exit".to_string());
+    }
+
+    pub fn exit_selection_mode(&mut self) {
+        self.mode = AppMode::DiffView;
+        self.selection_start = None;
+        self.selection_end = None;
+        self.status_message = Some("Selection mode exited".to_string());
+    }
+
+    pub fn toggle_selection_anchor(&mut self) {
+        if self.selection_start.is_none() {
+            // Set the start of selection at current cursor position
+            self.selection_start = Some(self.cursor_position);
+            self.selection_end = Some(self.cursor_position);
+            self.status_message = Some(format!("Selection start: line {}", self.cursor_position));
+        } else {
+            // Finalize the selection
+            if let Some(start) = self.selection_start {
+                self.status_message = Some(format!(
+                    "Selection: lines {}-{} ({} lines selected)",
+                    start.min(self.cursor_position),
+                    start.max(self.cursor_position),
+                    (start as i32 - self.cursor_position as i32).abs() + 1
+                ));
+            }
+        }
+    }
+
+    pub fn update_selection_end(&mut self) {
+        if self.selection_start.is_some() {
+            self.selection_end = Some(self.cursor_position);
+        }
+    }
+
+    pub fn cursor_up(&mut self) {
+        if self.cursor_position > 0 {
+            self.cursor_position -= 1;
+            // Scroll up if cursor moves above visible area
+            if self.cursor_position < self.scroll_offset {
+                self.scroll_offset = self.cursor_position;
+            }
+        }
+    }
+
+    pub fn cursor_down(&mut self, max_visible_lines: usize) {
+        if self.cursor_position + 1 < self.diff_lines.len() {
+            self.cursor_position += 1;
+            // Scroll down if cursor moves below visible area
+            if self.cursor_position >= self.scroll_offset + max_visible_lines {
+                self.scroll_offset = self.cursor_position - max_visible_lines + 1;
+            }
+        }
+    }
+
+    pub fn get_selection_range(&self) -> Option<(usize, usize)> {
+        match (self.selection_start, self.selection_end) {
+            (Some(start), Some(end)) => {
+                let min = start.min(end);
+                let max = start.max(end);
+                Some((min, max))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -210,6 +298,9 @@ fn handle_diffview_input<B: ratatui::backend::Backend>(
             app.mode = AppMode::SelectingTarget;
             let _ = app.file_browser.load_entries();
         }
+        KeyCode::Char('v') => {
+            app.enter_selection_mode();
+        }
         KeyCode::Char('c') => match app.copy_to_clipboard() {
             Ok(_) => {
                 app.status_message = Some("Diff copied to clipboard!".to_string());
@@ -239,6 +330,64 @@ fn handle_diffview_input<B: ratatui::backend::Backend>(
     Ok(false)
 }
 
+fn handle_selection_input<B: ratatui::backend::Backend>(
+    app: &mut App,
+    key_code: KeyCode,
+    terminal: &Terminal<B>,
+) -> io::Result<bool> {
+    match key_code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('v') => {
+            app.exit_selection_mode();
+        }
+        KeyCode::Char(' ') => {
+            app.toggle_selection_anchor();
+        }
+        KeyCode::Char('c') => {
+            if app.get_selection_range().is_some() {
+                match app.copy_to_clipboard() {
+                    Ok(_) => {
+                        app.status_message = Some("Selection copied to clipboard!".to_string());
+                    }
+                    Err(e) => {
+                        app.status_message = Some(format!("Error: {}", e));
+                    }
+                }
+            } else {
+                app.status_message =
+                    Some("No selection made. Press Space to mark start/end.".to_string());
+            }
+        }
+        KeyCode::Char('e') => {
+            if app.get_selection_range().is_some() {
+                match app.export_to_file() {
+                    Ok(filename) => {
+                        app.status_message = Some(format!("Selection exported to {}", filename));
+                    }
+                    Err(e) => {
+                        app.status_message = Some(format!("Error: {}", e));
+                    }
+                }
+            } else {
+                app.status_message =
+                    Some("No selection made. Press Space to mark start/end.".to_string());
+            }
+        }
+        KeyCode::Up => {
+            app.cursor_up();
+            app.update_selection_end();
+        }
+        KeyCode::Down => {
+            let content_height = terminal.size()?.height.saturating_sub(8) as usize;
+            app.cursor_down(content_height);
+            app.update_selection_end();
+        }
+        _ => {}
+    }
+
+    Ok(false)
+}
+
 pub fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
@@ -256,6 +405,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                 AppMode::SelectingSource | AppMode::SelectingTarget => {
                     handle_browser_input(&mut app, key.code, terminal)?
                 }
+                AppMode::SelectionMode => handle_selection_input(&mut app, key.code, terminal)?,
             };
 
             if should_exit {

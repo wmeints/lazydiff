@@ -23,7 +23,7 @@ pub fn render_ui(f: &mut Frame, app: &App) {
 
     // Main content area - either diff view or file browser
     match app.mode {
-        AppMode::DiffView => {
+        AppMode::DiffView | AppMode::SelectionMode => {
             render_diff_view(f, app, chunks[1]);
         }
         AppMode::SelectingSource | AppMode::SelectingTarget => {
@@ -50,13 +50,16 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 fn render_diff_view(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let content_height = area.height.saturating_sub(2) as usize;
+    let selection_range = app.get_selection_range();
+
     let visible_lines: Vec<Line> = app
         .diff_lines
         .iter()
+        .enumerate()
         .skip(app.scroll_offset)
         .take(content_height)
-        .map(|diff_line| {
-            let (prefix, style) = match diff_line.tag {
+        .map(|(idx, diff_line)| {
+            let (prefix, fg_style) = match diff_line.tag {
                 ChangeTag::Delete => (
                     "-",
                     Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
@@ -70,15 +73,38 @@ fn render_diff_view(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 ChangeTag::Equal => (" ", Style::default()),
             };
 
+            // Determine background color for full-width highlighting
+            let mut bg_style = Style::default();
+
+            // Highlight selected lines in selection mode
+            if let Some((start, end)) = selection_range
+                && idx >= start
+                && idx <= end
+            {
+                bg_style = bg_style.bg(Color::Blue);
+            }
+
+            // Highlight the current line in selection mode (overrides selection)
+            if app.mode == AppMode::SelectionMode && idx == app.cursor_position {
+                bg_style = bg_style.bg(Color::DarkGray);
+            }
+
             Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(&diff_line.content, style),
+                Span::styled(prefix, fg_style),
+                Span::styled(&diff_line.content, fg_style),
             ])
+            .style(bg_style)
         })
         .collect();
 
+    let title = if app.mode == AppMode::SelectionMode {
+        "Diff - SELECTION MODE"
+    } else {
+        "Diff"
+    };
+
     let diff_widget = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL).title("Diff"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false });
 
     f.render_widget(diff_widget, area);
@@ -142,12 +168,27 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Span::raw(" Select source  "),
                 Span::styled("[t]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" Select target  "),
+                Span::styled("[v]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Selection mode  "),
                 Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" Copy  "),
                 Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" Export  "),
                 Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" Scroll"),
+            ])],
+            AppMode::SelectionMode => vec![Line::from(vec![
+                Span::raw("Commands: "),
+                Span::styled("[v]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Exit selection  "),
+                Span::styled("[Space]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Mark start/end  "),
+                Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Copy  "),
+                Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Export  "),
+                Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" Adjust selection"),
             ])],
             AppMode::SelectingSource | AppMode::SelectingTarget => vec![Line::from(vec![
                 Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
