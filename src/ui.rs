@@ -78,7 +78,8 @@ fn render_diff_view(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
             // Highlight selected lines in selection mode
             if let Some((start, end)) = selection_range
-                && idx >= start && idx <= end
+                && idx >= start
+                && idx <= end
             {
                 bg_style = bg_style.bg(Color::Blue);
             }
