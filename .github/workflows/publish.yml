@@ -37,10 +37,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
       - name: Publish to crates.io
         env:
