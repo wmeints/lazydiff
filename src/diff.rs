@@ -25,11 +25,6 @@ pub fn generate_diff(source_content: &str, target_content: &str) -> Vec<DiffLine
                 content: line.to_string(),
             });
         }
-
-        // Handle the case where the content ends with a newline
-        if content.ends_with('\n') && !content.trim().is_empty() {
-            // Already handled by lines()
-        }
     }
 
     diff_lines
