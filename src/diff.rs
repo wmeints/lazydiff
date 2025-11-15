@@ -35,15 +35,34 @@ pub fn generate_diff(source_content: &str, target_content: &str) -> Vec<DiffLine
     diff_lines
 }
 
-pub fn generate_patch(source_file: &str, target_file: &str, diff_lines: &[DiffLine]) -> String {
+pub fn generate_patch(
+    source_file: &str,
+    target_file: &str,
+    diff_lines: &[DiffLine],
+    line_range: Option<(usize, usize)>,
+) -> String {
     let mut patch = String::new();
 
     // Add patch header
     patch.push_str(&format!("--- {}\n", source_file));
     patch.push_str(&format!("+++ {}\n", target_file));
 
+    // Determine which lines to include
+    let lines_to_include: Vec<&DiffLine> = match line_range {
+        Some((start, end)) => {
+            // Filter diff_lines to only include the selected range
+            diff_lines
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i >= start && *i <= end)
+                .map(|(_, line)| line)
+                .collect()
+        }
+        None => diff_lines.iter().collect(),
+    };
+
     // Add diff lines in unified format
-    for diff_line in diff_lines {
+    for diff_line in lines_to_include {
         let prefix = match diff_line.tag {
             ChangeTag::Delete => "-",
             ChangeTag::Insert => "+",
@@ -137,7 +156,7 @@ mod tests {
         let target_content = fs::read_to_string(&target)?;
 
         let diff_lines = generate_diff(&source_content, &target_content);
-        let patch = generate_patch(&source, &target, &diff_lines);
+        let patch = generate_patch(&source, &target, &diff_lines, None);
 
         // Verify patch header
         assert!(patch.contains(&format!("--- {}", source)));
@@ -166,7 +185,7 @@ mod tests {
         let target_content = fs::read_to_string(&target)?;
 
         let diff_lines = generate_diff(&source_content, &target_content);
-        let patch = generate_patch(&source, &target, &diff_lines);
+        let patch = generate_patch(&source, &target, &diff_lines, None);
 
         // Export the patch
         let filename = export_to_file(&patch)?;
@@ -204,7 +223,7 @@ mod tests {
         let target_content = fs::read_to_string(&target)?;
 
         let diff_lines = generate_diff(&source_content, &target_content);
-        let patch = generate_patch(&source, &target, &diff_lines);
+        let patch = generate_patch(&source, &target, &diff_lines, None);
 
         // Try to initialize clipboard, but handle gracefully if not available
         match Clipboard::new() {
